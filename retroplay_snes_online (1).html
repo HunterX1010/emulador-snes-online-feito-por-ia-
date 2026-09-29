@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RetroPlay - SNES Netplay</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Press+Start+2P&display=swap');
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0f172a; 
+            color: #f8fafc;
+            overflow: hidden;
+        }
+
+        .retro-title {
+            font-family: 'Press Start 2P', cursive;
+            background: linear-gradient(to right, #3b82f6, #10b981);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        #game-container {
+            position: relative;
+            width: 100%;
+            max-width: 800px;
+            aspect-ratio: 4 / 3;
+            background-color: #000;
+            border-radius: 12px;
+            box-shadow: 0 0 30px rgba(59, 130, 246, 0.4);
+            overflow: hidden;
+            margin: 0 auto;
+        }
+
+        #game-canvas {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            image-rendering: pixelated;
+        }
+
+        /* Scanlines retrô sobre a tela */
+        .scanlines {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            background-size: 100% 4px, 3px 100%;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        .hidden { display: none !important; }
+
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #64748b; border-radius: 4px; }
+    </style>
+</head>
+<body class="h-screen w-screen flex flex-col">
+
+    <header class="w-full p-4 flex justify-between items-center bg-slate-800 border-b border-slate-700 shadow-lg z-20 relative">
+        <div class="flex items-center gap-3">
+            <span class="text-3xl">🎮</span>
+            <h1 class="retro-title text-xl mt-1">RetroPlay</h1>
+        </div>
+        
+        <div id="status-badge" class="px-4 py-1.5 rounded-full bg-slate-700 text-sm font-semibold flex items-center gap-2 transition-colors">
+            <div class="w-2.5 h-2.5 rounded-full bg-yellow-500 animate-pulse" id="status-dot"></div>
+            <span id="status-text">Inicializando Rede...</span>
+        </div>
+
+        <button onclick="toggleConfig()" class="p-2 px-4 rounded-lg bg-slate-700 hover:bg-slate-600 transition text-white flex items-center gap-2">
+            ⚙️ Controles
+        </button>
+    </header>
+
+    <main class="flex-1 flex flex-col items-center justify-center p-4 relative">
+        
+        <!-- Tela de Abertura / Host -->
+        <div id="lobby-screen" class="flex flex-col items-center justify-center text-center max-w-lg w-full bg-slate-800 p-8 rounded-2xl shadow-2xl border border-slate-700">
+            <h2 class="text-2xl font-bold mb-2">Hospedar (Player 1)</h2>
+            <p class="text-slate-400 mb-6">Selecione uma ROM de Super Nintendo (.smc, .sfc) para criar a sala.</p>
+            
+            <label class="w-full flex flex-col items-center px-4 py-6 bg-slate-900 text-blue-400 rounded-xl tracking-wide uppercase border-2 border-dashed border-blue-500 cursor-pointer hover:bg-blue-900/20 hover:text-blue-300 transition">
+                <span class="text-4xl mb-3">📂</span>
+                <span class="font-bold text-sm">Selecionar ROM</span>
+                <input type="file" id="host-rom-input" accept=".smc,.sfc,.zip" class="hidden" />
+            </label>
+        </div>
+
+        <!-- Tela de Ingresso / P2 -->
+        <div id="join-screen" class="hidden flex-col items-center justify-center text-center max-w-lg w-full bg-slate-800 p-8 rounded-2xl shadow-2xl border border-slate-700">
+            <h2 class="text-2xl font-bold mb-2">Entrando (Player 2)</h2>
+            <p class="text-slate-400 mb-6">Você conectou ao Host! Para jogar, você precisa selecionar <b>exatamente o mesmo arquivo de ROM</b> que o Player 1 escolheu.</p>
+            
+            <div id="client-loading" class="text-5xl mb-4">⏳</div>
+
+            <label id="client-rom-label" class="hidden w-full flex flex-col items-center px-4 py-6 bg-slate-900 text-green-400 rounded-xl tracking-wide uppercase border-2 border-dashed border-green-500 cursor-pointer hover:bg-green-900/20 hover:text-green-300 transition">
+                <span class="text-4xl mb-3">📂</span>
+                <span class="font-bold text-sm">Selecione a Mesma ROM</span>
+                <input type="file" id="client-rom-input" accept=".smc,.sfc,.zip" class="hidden" />
+            </label>
+        </div>
+
+        <!-- Tela do Emulador -->
+        <div id="game-wrapper" class="hidden w-full flex-col items-center">
+            
+            <!-- Painel de Link de Convite (Host) -->
+            <div id="invite-panel" class="hidden mb-4 bg-slate-800 border border-blue-500/50 p-3 rounded-lg shadow-lg flex items-center gap-4 w-full max-w-[800px]">
+                <div class="flex-1 overflow-hidden">
+                    <p class="text-xs text-slate-400 mb-1 font-bold uppercase tracking-wider">Envie este link para o Player 2</p>
+                    <input type="text" id="invite-link" readonly class="w-full bg-slate-900 text-blue-300 text-sm p-2 rounded outline-none border border-slate-700 focus:border-blue-500 cursor-text">
+                </div>
+                <button onclick="copyInviteLink()" class="bg-blue-600 hover:bg-blue-500 px-4 py-3 rounded-lg font-bold transition flex items-center gap-2 h-full mt-5">
+                    📋 Copiar
+                </button>
+            </div>
+
+            <div id="game-container">
+                <div id="emulator-target" class="w-full h-full bg-slate-950 flex items-center justify-center text-slate-500 text-sm">
+                    Aguardando inicialização do emulador...
+                </div>
+                <div class="scanlines"></div>
+            </div>
+        </div>
+    </main>
+
+    <div id="config-modal" class="fixed inset-0 bg-black/80 z-50 hidden flex items-center justify-center p-4 backdrop-blur-sm">
+        <div class="bg-slate-800 border border-slate-600 w-full max-w-md rounded-2xl shadow-2xl flex flex-col overflow-hidden max-h-full">
+            <div class="p-4 bg-slate-700 flex justify-between items-center">
+                <h3 class="font-bold text-lg">⌨️ Configurar Controles</h3>
+                <button onclick="toggleConfig()" class="text-slate-300 hover:text-white text-xl">❌</button>
+            </div>
+            <div class="p-4 overflow-y-auto flex-1">
+                <p class="text-sm text-slate-400 mb-4">Clique em um botão abaixo e pressione a tecla do seu teclado para mapear. Controles USB/Bluetooth são detectados automaticamente.</p>
+                <div id="mapping-list" class="flex flex-col gap-2">
+                    <!-- Gerado via JS -->
+                </div>
+            </div>
+            <div class="p-4 bg-slate-900 border-t border-slate-700 text-center text-xs text-slate-400">
+                P1 joga no teclado local. P2 joga no teclado dele. Entradas são sincronizadas pela rede.
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        // Estado Global
+        const state = {
+            mode: 'menu', 
+            peer: null,
+            conn: null, 
+            myId: null,
+            isMapping: false,
+            mappingButton: null,
+            romFile: null,
+            nostalgistInst: null,
+            gameRunning: false
+        };
+
+        const el = {
+            lobby: document.getElementById('lobby-screen'),
+            join: document.getElementById('join-screen'),
+            gameWrapper: document.getElementById('game-wrapper'),
+            emulatorTarget: document.getElementById('emulator-target'),
+            invitePanel: document.getElementById('invite-panel'),
+            inviteLink: document.getElementById('invite-link'),
+            hostRomInput: document.getElementById('host-rom-input'),
+            clientRomInput: document.getElementById('client-rom-input'),
+            statusText: document.getElementById('status-text'),
+            statusDot: document.getElementById('status-dot'),
+            configModal: document.getElementById('config-modal'),
+            mappingList: document.getElementById('mapping-list')
+        };
+
+        // --- SISTEMA DE GAMEPAD VIRTUAL E SINCRONIZAÇÃO ---
+        const SNES_BUTTONS = [
+            { id: 12, name: 'Cima' }, { id: 13, name: 'Baixo' }, { id: 14, name: 'Esquerda' }, { id: 15, name: 'Direita' },
+            { id: 0, name: 'Botão B' }, { id: 1, name: 'Botão A' }, { id: 2, name: 'Botão Y' }, { id: 3, name: 'Botão X' },
+            { id: 4, name: 'Gatilho L' }, { id: 5, name: 'Gatilho R' },
+            { id: 8, name: 'Select' }, { id: 9, name: 'Start' }
+        ];
+
+        let keyMap = {
+            'ArrowUp': 12, 'ArrowDown': 13, 'ArrowLeft': 14, 'ArrowRight': 15,
+            'KeyZ': 0, 'KeyX': 1, 'KeyA': 2, 'KeyS': 3,
+            'KeyQ': 4, 'KeyW': 5,
+            'Space': 8, 'Enter': 9
+        };
+
+        // Criamos dois gamepads. O Host usa o [0], O Cliente usa o [1].
+        const mockGamepads = [createFakeGamepad(0), createFakeGamepad(1), null, null];
+        
+        function createFakeGamepad(index) {
+            return {
+                id: `Virtual Gamepad P${index+1}`,
+                index: index,
+                connected: true,
+                timestamp: performance.now(),
+                mapping: 'standard',
+                axes: [0, 0, 0, 0],
+                buttons: Array(17).fill(0).map(() => ({ pressed: false, touched: false, value: 0 }))
+            };
+        }
+
+        // Interceptação nativa para o Emulador enxergar nossos controles em vez do hardware direto
+        const originalGetGamepads = navigator.getGamepads ? navigator.getGamepads.bind(navigator) : () => [];
+        navigator.getGamepads = () => {
+            if (mockGamepads[0]) mockGamepads[0].timestamp = performance.now();
+            if (mockGamepads[1]) mockGamepads[1].timestamp = performance.now();
+            return mockGamepads;
+        };
+
+        window.addEventListener('keydown', handleKey(true), { capture: true });
+        window.addEventListener('keyup', handleKey(false), { capture: true });
+
+        function handleKey(isPressed) {
+            return (e) => {
+                if (state.isMapping) {
+                    if (isPressed) bindKey(e.code);
+                    e.preventDefault();
+                    return;
+                }
+
+                const btnIndex = keyMap[e.code];
+                if (btnIndex !== undefined) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    
+                    // Atualiza localmente e agenda envio pela rede
+                    const localPadIndex = state.mode === 'client' ? 1 : 0;
+                    mockGamepads[localPadIndex].buttons[btnIndex].pressed = isPressed;
+                    mockGamepads[localPadIndex].buttons[btnIndex].value = isPressed ? 1 : 0;
+                }
+            };
+        }
+
+        function pollPhysicalGamepads() {
+            try {
+                const pads = originalGetGamepads();
+                if (pads && pads.length > 0) {
+                    const physicalPad = pads[0];
+                    if (physicalPad && physicalPad.connected && physicalPad.buttons) {
+                        const localPadIndex = state.mode === 'client' ? 1 : 0;
+                        for (let i = 0; i < 17; i++) {
+                            if(physicalPad.buttons[i]) {
+                                mockGamepads[localPadIndex].buttons[i].pressed = physicalPad.buttons[i].pressed;
+                                mockGamepads[localPadIndex].buttons[i].value = physicalPad.buttons[i].value;
+                            }
+                        }
+                    }
+                }
+            } catch (e) {}
+            requestAnimationFrame(pollPhysicalGamepads);
+        }
+        pollPhysicalGamepads();
+
+        // Loop para enviar o status do controle local para o oponente a 60 FPS
+        setInterval(() => {
+            if (state.conn && state.conn.open && state.gameRunning) {
+                const localPadIndex = state.mode === 'client' ? 1 : 0;
+                // Envia array simplificado de booleanos para reduzir tamanho do pacote
+                const inputs = mockGamepads[localPadIndex].buttons.map(b => b.pressed);
+                state.conn.send({ type: 'INPUT', data: inputs });
+            }
+        }, 1000 / 60);
+
+        function updateStatus(text, colorClass) {
+            el.statusText.innerText = text;
+            el.statusDot.className = `w-2.5 h-2.5 rounded-full ${colorClass}`;
+        }
+
+        function initPeer() {
+            if (typeof Peer === 'undefined') {
+                updateStatus('Erro: PeerJS não carregou', 'bg-red-600');
+                return;
+            }
+
+            try {
+                // Instância padrão sem configurações complexas para evitar bloqueios de STUN
+                state.peer = new Peer();
+                
+                state.peer.on('open', id => {
+                    state.myId = id;
+                    checkUrlMode();
+                });
+
+                state.peer.on('error', err => {
+                    console.error("Erro PeerJS:", err);
+                    updateStatus('Erro de Conexão', 'bg-red-500');
+                });
+            } catch (e) {
+                console.error(e);
+                updateStatus('Rede Indisponível', 'bg-red-600');
+            }
+        }
+
+        function checkUrlMode() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const joinId = urlParams.get('join');
+
+            if (joinId) {
+                // SOU O JOGADOR 2
+                state.mode = 'client';
+                el.lobby.classList.add('hidden');
+                el.join.classList.remove('hidden');
+                
+                updateStatus('Conectando ao Host...', 'bg-yellow-500 animate-pulse');
+                state.conn = state.peer.connect(joinId);
+                
+                state.conn.on('open', () => {
+                    updateStatus('Conectado! Selecione a ROM', 'bg-green-500');
+                    document.getElementById('client-loading').classList.add('hidden');
+                    el.clientRomInput.parentElement.classList.remove('hidden');
+                });
+
+                setupNetworkListeners(state.conn);
+
+            } else {
+                // SOU O JOGADOR 1
+                state.mode = 'host';
+                updateStatus('Sala Pronta', 'bg-blue-500');
+                
+                state.peer.on('connection', conn => {
+                    state.conn = conn;
+                    updateStatus('P2 Conectado! Aguardando Ready...', 'bg-yellow-500 animate-pulse');
+                    setupNetworkListeners(conn);
+                });
+            }
+        }
+
+        function setupNetworkListeners(conn) {
+            conn.on('data', data => {
+                // Recebeu inputs do outro jogador
+                if (data.type === 'INPUT') {
+                    const remotePadIndex = state.mode === 'client' ? 0 : 1;
+                    for (let i = 0; i < 17; i++) {
+                        mockGamepads[remotePadIndex].buttons[i].pressed = data.data[i];
+                        mockGamepads[remotePadIndex].buttons[i].value = data.data[i] ? 1 : 0;
+                    }
+                }
+                
+                // Cliente avisou que selecionou a ROM e está pronto
+                if (data.type === 'CLIENT_READY' && state.mode === 'host') {
+                    updateStatus('Jogando Online!', 'bg-green-500');
+                    el.invitePanel.classList.add('hidden'); // Esconde link
+                    // Avisa pro cliente rodar tbm
+                    state.conn.send({ type: 'HOST_START' });
+                    startEmulator();
+                }
+
+                // Host mandou o aviso para iniciar
+                if (data.type === 'HOST_START' && state.mode === 'client') {
+                    updateStatus('Jogando Online!', 'bg-green-500');
+                    startEmulator();
+                }
+            });
+
+            conn.on('close', () => {
+                updateStatus('Oponente desconectou', 'bg-red-500');
+            });
+        }
+
+        el.hostRomInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            state.romFile = file;
+
+            el.lobby.classList.add('hidden');
+            el.gameWrapper.classList.remove('hidden');
+            el.gameWrapper.classList.add('flex');
+            el.invitePanel.classList.remove('hidden');
+            el.invitePanel.classList.add('flex');
+
+            const link = window.location.origin + window.location.pathname + '?join=' + state.myId;
+            el.inviteLink.value = link;
+            updateStatus('Aguardando Player 2 entrar...', 'bg-yellow-500 animate-pulse');
+        });
+
+        el.clientRomInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            state.romFile = file;
+
+            el.join.classList.add('hidden');
+            el.gameWrapper.classList.remove('hidden');
+            el.gameWrapper.classList.add('flex');
+            
+            updateStatus('Aguardando sincronização...', 'bg-yellow-500 animate-pulse');
+            // Avisa o host que estamos com a ROM engatilhada
+            state.conn.send({ type: 'CLIENT_READY' });
+        });
+
+        async function startEmulator() {
+            el.emulatorTarget.innerHTML = '<div class="text-white text-lg flex flex-col items-center"><span class="text-4xl mb-4 animate-spin">⏳</span> Carregando Núcleo do Emulador...</div>';
+            
+            try {
+                // Importa Dinamicamente apenas na hora de jogar (evita travamentos)
+                const { Nostalgist } = await import('https://unpkg.com/nostalgist/dist/nostalgist.esm.js');
+
+                state.nostalgistInst = await Nostalgist.snes({
+                    rom: state.romFile,
+                    core: 'snes9x',
+                    element: el.emulatorTarget,
+                    resolveRom: false
+                });
+
+                state.gameRunning = true;
+                
+                const canvas = el.emulatorTarget.querySelector('canvas');
+                if(canvas) canvas.id = 'game-canvas';
+
+            } catch (err) {
+                console.error(err);
+                alert("Falha ao inicializar o emulador. Verifique se o arquivo é válido.");
+            }
+        }
+
+        window.copyInviteLink = () => {
+            el.inviteLink.select();
+            document.execCommand('copy');
+            const btn = document.querySelector('#invite-panel button');
+            btn.innerHTML = '✅ Copiado!';
+            btn.classList.add('bg-green-600', 'border-green-500');
+            setTimeout(() => {
+                btn.innerHTML = '📋 Copiar';
+                btn.classList.remove('bg-green-600', 'border-green-500');
+            }, 2000);
+        };
+
+        window.toggleConfig = () => {
+            el.configModal.classList.toggle('hidden');
+            if(!el.configModal.classList.contains('hidden')) renderMappingUI();
+        };
+
+        function renderMappingUI() {
+            el.mappingList.innerHTML = '';
+            SNES_BUTTONS.forEach(btn => {
+                const boundKey = Object.keys(keyMap).find(key => keyMap[key] === btn.id) || 'Não mapeado';
+                const row = document.createElement('div');
+                row.className = 'flex justify-between items-center bg-slate-900 p-3 rounded border border-slate-700';
+                row.innerHTML = `
+                    <span class="font-bold text-slate-300 w-1/3">${btn.name}</span>
+                    <button id="map-btn-${btn.id}" class="flex-1 bg-slate-700 hover:bg-blue-600 text-white py-1 px-3 rounded transition font-mono text-sm">
+                        ${boundKey.replace('Key', '').replace('Arrow', 'Seta ')}
+                    </button>
+                `;
+                row.querySelector('button').onclick = () => startMapping(btn.id, row.querySelector('button'));
+                el.mappingList.appendChild(row);
+            });
+        }
+
+        function startMapping(btnId, btnElement) {
+            state.isMapping = true;
+            state.mappingButton = btnId;
+            document.querySelectorAll('#mapping-list button').forEach(b => b.classList.remove('bg-blue-500', 'animate-pulse'));
+            btnElement.classList.add('bg-blue-500', 'animate-pulse');
+            btnElement.innerText = "Pressione a tecla...";
+        }
+
+        function bindKey(keyCode) {
+            if (keyMap[keyCode] !== undefined) delete keyMap[keyCode];
+            for (let k in keyMap) { if (keyMap[k] === state.mappingButton) delete keyMap[k]; }
+            keyMap[keyCode] = state.mappingButton;
+            state.isMapping = false;
+            state.mappingButton = null;
+            renderMappingUI();
+        }
+
+        // Inicia a rede
+        initPeer();
+
+    </script>
+</body>
+</html>
